@@ -37,12 +37,14 @@ impl SocketErrRecvExt for RawFd {
 #[cfg(test)]
 mod test {
     use super::*;
-    use nix::sys::socket::{Ipv4Addr, setsockopt, sockopt};
+    use nix::sys::socket::{setsockopt, sockopt};
+
+    const PING: &[u8] = &[1, 2, 3, 4];
 
     // TODO: Test should skip on IPv6-only hosts, but will unwrap somewhere instead.
     #[test]
     fn basic_ipv4() {
-        const PING: &[u8] = &[1, 2, 3, 4];
+        use nix::sys::socket::Ipv4Addr;
 
         let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
         // Enable async socket errors
@@ -64,6 +66,36 @@ mod test {
                 assert_eq!(exterr.ee_code, 3); // ICMP Unreachable port
                 assert_eq!(origin.map(|s| Ipv4Addr(s.sin_addr)),
                     Some(Ipv4Addr::new(127, 0, 0, 1)));
+            }
+            _ => panic!("Unexpected cmsg: {:?}", cmsg),
+        }
+    }
+
+    // TODO: Test should skip on IPv4-only hosts, but will unwrap somewhere instead.
+    #[test]
+    fn basic_ipv6() {
+        use nix::sys::socket::Ipv6Addr;
+
+        let socket = UdpSocket::bind("[::]:0").unwrap();
+        // Enable async socket errors
+        setsockopt(socket.as_raw_fd(), sockopt::Ipv6RecvErr, &true).unwrap();
+
+        // Test: send a datagram to an unlikely high-numbered port
+        socket.send_to(PING, "[::1]:34567").unwrap();
+
+        // Our extension:
+        let mut buf = [0u8; 576];
+        let (bytes, cmsg) = socket.recv_err(&mut buf).unwrap();
+
+        assert_eq!(&buf[..bytes], PING);
+        match cmsg {
+            ControlMessageOwned::Ipv6RecvErr(exterr, origin) => {
+                assert_eq!(exterr.ee_errno as i32, libc::ECONNREFUSED);
+                assert_eq!(exterr.ee_origin, libc::SO_EE_ORIGIN_ICMP6);
+                assert_eq!(exterr.ee_type, 1); // ICMPv6 Unreachable
+                assert_eq!(exterr.ee_code, 4); // ICMPv6 Unreachable port
+                assert_eq!(origin.map(|s| Ipv6Addr(s.sin6_addr)),
+                    Some(Ipv6Addr::new(0,0,0,0,0,0,0,1)));
             }
             _ => panic!("Unexpected cmsg: {:?}", cmsg),
         }
